@@ -8,103 +8,95 @@
 #include <sys/utsname.h>
 #include <ctype.h>
 
-#define MAX_LINE_LENGTH 1024
+#define MAX_BUFFER_SIZE 1024
 
-// Define current session state code
-#define SESSION_INIT_STATE 0
-#define CLIENT_INIT_STATE 1
-#define TRX_FIRST_STATE 2
-#define TRX_SECOND_STATE 3
-#define TRX_THIRD_STATE 4
-#define TRX_FOURTH_STATE 5
+// Define current session state codes
+#define INITIAL_STATE 0
+#define GREETING_STATE 1
+#define MAIL_STATE 2
+#define RECIPIENT_STATE 3
+#define DATA_STATE 4
 
-#define OK "250 OK\r\n"
-#define BAD_SEQUENCE "503 Bad sequence of commands\r\n"
-#define NOT_IMPLEMENTED "502 Command not implemented\r\n"
-#define SYNTAX_ERROR "500 Syntax error, command unrecognized or too long\r\n"
-#define SYNTAX_ERROR_PARAM "501 Syntax error in parameters or arguments\r\n"
-#define SEND_STRING_ERROR "Cannot send string to client.\n"
-#define UNSUP_PARAM "555 parameters not recognized or not implemented\r\n"
-#define MAIL_BOX_NOT_FOUND "550 mail box not found\r\n"
-#define OK_354 "354 OK Start mail input\r\n"
-#define SERVICE_NOT_AVAILABLE "421 Service not available, closing channel\r\n"
-#define LOCAL_ERROR "451 Requested action aborted due to local error\r\n"
+#define RESPONSE_OK "250 OK\r\n"
+#define RESPONSE_BAD_SEQUENCE "503 Bad sequence of commands\r\n"
+#define RESPONSE_NOT_IMPLEMENTED "502 Command not implemented\r\n"
+#define RESPONSE_SYNTAX_ERROR "500 Syntax error, command unrecognized or too long\r\n"
+#define RESPONSE_SYNTAX_ERROR_PARAM "501 Syntax error in parameters or arguments\r\n"
+#define RESPONSE_SEND_ERROR "Cannot send string to client.\n"
+#define RESPONSE_UNSUPPORTED_PARAM "555 parameters not recognized or not implemented\r\n"
+#define RESPONSE_MAILBOX_NOT_FOUND "550 mail box not found\r\n"
+#define RESPONSE_START_MAIL "354 OK Start mail input\r\n"
+#define RESPONSE_SERVICE_UNAVAILABLE "421 Service not available, closing channel\r\n"
+#define RESPONSE_LOCAL_ERROR "451 Requested action aborted due to local error\r\n"
 
-static void handle_client(int fd);
+static void process_client(int client_fd);
 
 int main(int argc, char *argv[]) {
   
   if (argc != 2) {
-    fprintf(stderr, "Invalid arguments. Expected: %s <port>\n", argv[0]);
+    fprintf(stderr, "Usage: %s <port>\n", argv[0]);
     return 1;
   }
   
-  run_server(argv[1], handle_client);
+  run_server(argv[1], process_client);
   
   return 0;
 }
 
 /**
- * Check if the command is invalid, unsupported or out of order and do
- * corresponding reply.
+ * Validates and replies to commands based on their correctness and support.
  *
- * @param fd socket file descriptor
- * @param cmd command to check
+ * @param client_fd socket file descriptor
+ * @param command command string to validate
  *
- * @return non-negative value if OK, -1 otherwise  
+ * @return non-negative value if command is valid, -1 otherwise  
  */
-int checkCmdAndReply(int fd, char *cmd) {
-  // Note that we always check if it's a in-order and valid command before
-  // calling the function, so we just need to check if it's a valid supported
-  // command to determine if it's out of order. We don't need to check if it's
-  // NOOP and QUIT either.
-  if (!strncasecmp(cmd, "HELO ", 5) || !strncasecmp(cmd, "MAIL FROM:", 10) ||
-      !strncasecmp(cmd, "RCPT TO:", 8) || !strncasecmp(cmd, "DATA\r\n", 6)) {
-    return send_string(fd, BAD_SEQUENCE);
+int validateCommandAndRespond(int client_fd, char *command) {
+  if (!strncasecmp(command, "HELO ", 5) || !strncasecmp(command, "MAIL FROM:", 10) ||
+      !strncasecmp(command, "RCPT TO:", 8) || !strncasecmp(command, "DATA\r\n", 6)) {
+    return send_string(client_fd, RESPONSE_BAD_SEQUENCE);
   }
 
-  // Check if it's unsupported command
-  if (!strncasecmp(cmd, "EHLO ", 5) || !strncasecmp(cmd, "RSET\r\n", 6) ||
-      !strncasecmp(cmd, "VRFY ", 5) || !strncasecmp(cmd, "EXPN ", 5) ||
-      !strncasecmp(cmd, "HELP ", 5) || !strncasecmp(cmd, "HELP\r\n", 6)) {
-    return send_string(fd, NOT_IMPLEMENTED);
+  if (!strncasecmp(command, "EHLO ", 5) || !strncasecmp(command, "RSET\r\n", 6) ||
+      !strncasecmp(command, "VRFY ", 5) || !strncasecmp(command, "EXPN ", 5) ||
+      !strncasecmp(command, "HELP ", 5) || !strncasecmp(command, "HELP\r\n", 6)) {
+    return send_string(client_fd, RESPONSE_NOT_IMPLEMENTED);
   }
 
-  // If run to here, it's an invalid command.
-  return send_string(fd, SYNTAX_ERROR); 
+  return send_string(client_fd, RESPONSE_SYNTAX_ERROR); 
 }
 
-// relese data object created in handle_client
-void release(net_buffer_t *nb, user_list_t *userList, int tmpFD) {
-  destroy_user_list(*userList);
-  nb_destroy(*nb);
-  if (tmpFD > 0)
-    close(tmpFD);
+// Releases resources created in process_client
+void cleanup_resources(net_buffer_t *buffer, user_list_t *users, int temp_fd) {
+  destroy_user_list(*users);
+  nb_destroy(*buffer);
+  if (temp_fd > 0) {
+    close(temp_fd);
+  }
 }
-
 
 /**
- * check if domain is a valid domain.
+ * Checks if a domain name is valid.
  *
- * @param domain input domain character string
- * @param len    length of domain, optional
+ * @param domain input domain string
+ * @param length optional length of the domain
  *
- * @return 1 if it is, 0 if it isn't
+ * @return 1 if valid, 0 otherwise
  */
-int isValidDomain(char *domain) {
-  int len = strlen(domain);
-  if(len == 0) return 0;
+int is_valid_domain(char *domain) {
+  int length = strlen(domain);
+  if(length == 0) return 0;
 
   if (domain[0] == '.' || domain[0] == '-') return 0;
 
-  for(int i = 1; i < len; i++) {
-    if (domain[i]<'0' && domain[i] > '9' // Not digit
-       && domain[i] < 'a' && domain[i] > 'z' 
-       && domain[i] < 'A' && domain[i] > 'Z' // Not letter
+  for(int i = 1; i < length; i++) {
+    if (domain[i]<'0' || domain[i]>'9' // Not digit
+       && domain[i]<'a' || domain[i]>'z' 
+       && domain[i]<'A' || domain[i]>'Z' // Not letter
        && domain[i] != '.' && domain[i] != '-')
-       return 0;
+      return 0;
    
-    if (domain[i-1] == '.' && (domain[i]=='.' || domain[i] == '-'))
+    if (domain[i-1] == '.' && (domain[i] == '.' || domain[i] == '-'))
       return 0; 
   }
 
@@ -112,330 +104,257 @@ int isValidDomain(char *domain) {
 }
 
 /**
- * find where mailBox starts
+ * Extracts the mailbox portion from a path.
  *
- * @param path reverse-path or forward path, it has to be a valid path.
+ * @param path reverse path or forward path
  *
- * @return the pointer to where mail box starts
+ * @return pointer to the mailbox portion
  */
-char* getMailBox(char *path) {
-  
+char* extract_mailbox(char *path) {
   char *p;
   p = strchr(path, '>');
   *p = 0;
-  // path is in form <@domain,@domain,...,@domain:mailbox>
   if ((p = strchr(path, ':')) != NULL)
     return p + 1;
 
-  // path is in form <mailbox>
   return path + 1;
 }
 
 /**
- * check if path is a valid path, i.e. <...>, there must be at least one
- * character between <>.
+ * Checks if a path is valid.
  *
- * @param path input character string
+ * @param path input string to check
  *
- * @return 1 if it is, 0 if it isn't
+ * @return 1 if valid, 0 otherwise
  */
-int isValidPath(char *path) {
-
-  int len = strlen(path);
-  if (len < 3 || strchr(path, '<') != path
-  || strchr(path, '>') != path + len - 1)
+int is_valid_path(char *path) {
+  int length = strlen(path);
+  if (length < 3 || strchr(path, '<') != path
+  || strchr(path, '>') != path + length - 1)
     return 0;
 
   return 1;
-  // Ignore all A-d-l  
-//  char *mailBox = strchr(path, ':');
-//  mailBox = mailBox == NULL ? path + 1 : mailBox + 1;
-//  path[len - 1] = 0;
-  
-//  int ret = isValidMailBox(mailBox);
-//  path[len - 1] = '>';
-//  return ret;
 }
 
-void handle_client(int fd) {
+void process_client(int client_fd) {
   
-  // TODO To be implemented
+  int status;
+  int session_state = INITIAL_STATE;
+  int temp_file_fd = -1;
+  int end_with_crlf = 1;
 
-  int err;
-  int state = SESSION_INIT_STATE;
-  int tempFileFD = -1;
-  int lineEndWithCRLF = 1; // 1 if previous line is end with <CRLF>, 
-                           // 0 otherwise. This is used to help determine
-                           // the end of mail data.
+  char buffer[MAX_BUFFER_SIZE];
+  char reverse_path[MAX_BUFFER_SIZE];
+  char temp_file_template[] = "template-XXXXXX";
 
-  char buf[MAX_LINE_LENGTH];
-  char reversePath[MAX_LINE_LENGTH];
-  char template[] = "template-XXXXXX";
-
-
-  net_buffer_t netBuf = nb_create(fd, MAX_LINE_LENGTH);
-  user_list_t userList = create_user_list();
+  net_buffer_t net_buffer = nb_create(client_fd, MAX_BUFFER_SIZE);
+  user_list_t user_list = create_user_list();
   
-
-  // First, send an greeting message.
-  struct utsname myInfo;
-  err = uname(&myInfo);
-  if (err != 0) {
-    err = send_string(fd, "220\r\n");
-    if (err < 0) {
-      fprintf(stderr, SEND_STRING_ERROR);
-      release(&netBuf, &userList, tempFileFD);
+  struct utsname sys_info;
+  status = uname(&sys_info);
+  if (status != 0) {
+    status = send_string(client_fd, "220\r\n");
+    if (status < 0) {
+      fprintf(stderr, RESPONSE_SEND_ERROR);
+      cleanup_resources(&net_buffer, &user_list, temp_file_fd);
       return;
     }
-  } 
-  else {
-    err = send_string(fd, "220 %s Simple Mail Transfer Service Ready\r\n", 
-                myInfo.__domainname);
-    if (err < 0) {
-      fprintf(stderr, SEND_STRING_ERROR);
-      release(&netBuf, &userList, tempFileFD);
+  } else {
+    status = send_string(client_fd, "220 %s Simple Mail Transfer Service Ready\r\n", 
+                sys_info.__domainname);
+    if (status < 0) {
+      fprintf(stderr, RESPONSE_SEND_ERROR);
+      cleanup_resources(&net_buffer, &user_list, temp_file_fd);
       return;
     }
   }
 
+  session_state = GREETING_STATE;
+  while ((status = nb_read_line(net_buffer, buffer)) > 0) {
 
-  // Interactively receive and reply
-  state = CLIENT_INIT_STATE;
-  while ((err = nb_read_line(netBuf, buf)) > 0) {
-
-    // If we are expecting commant, not data, we make sure it ends with <CRLF>
-    // and remove trailing space before <CRLF>
-    if (state != TRX_FOURTH_STATE) {
-      // Makesure the last two character is \r\n
-      int len = strlen(buf);
-      if (len < 2 || buf[len-1] != '\n' || buf[len-2] != '\r'){
-        err = send_string(fd, SYNTAX_ERROR);
-        if (err < 0) {
-          fprintf(stderr, SEND_STRING_ERROR);
-          release(&netBuf, &userList, tempFileFD);
+    if (session_state != DATA_STATE) {
+      int length = strlen(buffer);
+      if (length < 2 || buffer[length-1] != '\n' || buffer[length-2] != '\r'){
+        status = send_string(client_fd, RESPONSE_SYNTAX_ERROR);
+        if (status < 0) {
+          fprintf(stderr, RESPONSE_SEND_ERROR);
+          cleanup_resources(&net_buffer, &user_list, temp_file_fd);
           return;
         }
         continue;
       }
 
-    // Remove trailing space before CRLF
-      int tail = len - 2;
+      int tail = length - 2;
       while (tail > 0) {
-        if (buf[tail - 1] != ' ') break;
+        if (buffer[tail - 1] != ' ') break;
         tail--;
       }
-      buf[tail] = '\r';
-      buf[tail + 1] = '\n';
-      buf[tail + 2] = 0;
-      len = tail + 2;
+      buffer[tail] = '\r';
+      buffer[tail + 1] = '\n';
+      buffer[tail + 2] = 0;
+      length = tail + 2;
     }
 
-    // Is it a NOOP?
-    if ((!strncasecmp(buf, "NOOP ", 5) || !strncasecmp(buf, "NOOP\r\n",6))
-       && state != TRX_FOURTH_STATE) {
+    if ((!strncasecmp(buffer, "NOOP ", 5) || !strncasecmp(buffer, "NOOP\r\n", 6))
+       && session_state != DATA_STATE) {
 
-      err = send_string(fd, "250 OK\r\n");
-      if (err < 0) {
+      status = send_string(client_fd, "250 OK\r\n");
+      if (status < 0) {
         fprintf(stderr, "Cannot send string to client.\n");
-        release(&netBuf, &userList, tempFileFD);
+        cleanup_resources(&net_buffer, &user_list, temp_file_fd);
         return;
       }
       continue;
     }
 
-    // Is it a QUIT?
-    if (!strncasecmp(buf, "QUIT\r\n", 6) && state != TRX_FOURTH_STATE) {
-      err = send_string(fd, "221 OK\r\n");
-      if (err < 0) {
-        fprintf(stderr, SEND_STRING_ERROR); 
+    if (!strncasecmp(buffer, "QUIT\r\n", 6) && session_state != DATA_STATE) {
+      status = send_string(client_fd, "221 OK\r\n");
+      if (status < 0) {
+        fprintf(stderr, RESPONSE_SEND_ERROR); 
       }
-      release(&netBuf, &userList, tempFileFD);
+      cleanup_resources(&net_buffer, &user_list, temp_file_fd);
       return;
     }
 
+    switch (session_state) {
 
-    // respond according to our state and received command
-    switch (state) {
-
-      case CLIENT_INIT_STATE:
-        // Expect HELO
-        if (!strncasecmp(buf, "HELO ", 5)) {
- 
-          // Check if domain part is valid
-          char domain[MAX_LINE_LENGTH];
+      case GREETING_STATE:
+        if (!strncasecmp(buffer, "HELO ", 5)) {
+          char domain[MAX_BUFFER_SIZE];
           memset(domain, 0, sizeof(domain));
-//          sscanf(buf, "HELO %s\r\n", domain);
-          sscanf(buf+5, "%s\r\n", domain);
+          sscanf(buffer + 5, "%s\r\n", domain);
 
-          if (isValidDomain(domain)) {
-            err = send_string(fd, "250 OK %s greets %s\r\n", 
-                              myInfo.__domainname, 
+          if (is_valid_domain(domain)) {
+            status = send_string(client_fd, "250 OK %s greets %s\r\n", 
+                              sys_info.__domainname, 
                               domain);
-            state = TRX_FIRST_STATE;
+            session_state = MAIL_STATE;
+          } else {
+            status = send_string(client_fd, RESPONSE_SYNTAX_ERROR_PARAM);
           }
-          else // it isn't a valid domain
-            err = send_string(fd, SYNTAX_ERROR_PARAM);
+        } else {
+          status = validateCommandAndRespond(client_fd, buffer);
         }
-        else  // it's not a HELO command
-          err = checkCmdAndReply(fd, buf);
 
-        // Check if send_string succeeded
-        if (err < 0) {
-            fprintf(stderr, SEND_STRING_ERROR);
-            release(&netBuf, &userList, tempFileFD);
-            return;
+        if (status < 0) {
+          fprintf(stderr, RESPONSE_SEND_ERROR);
+          cleanup_resources(&net_buffer, &user_list, temp_file_fd);
+          return;
         }
         break;
 
-
-      case TRX_FIRST_STATE:
-        // Expect MAIL FROM:
-        if (!strncasecmp(buf, "MAIL FROM:", 10)) {
-          // Read reverse path
-          memset(reversePath, 0, sizeof(reversePath));
-          sscanf(buf+10, "%[<@:-,.A-Za-z0-9>]%*s", reversePath);
-          //Check if MAIL BOX is valid.
-          if (!isValidPath(reversePath) && strcmp(reversePath, "<>")) {
-            err = send_string(fd, SYNTAX_ERROR_PARAM);
-          }
-          else { // It's a valid path
-            char *token = strchr(buf, '>');
-            // Check if it has parameters after reverse path i.e. not ">\r\n"
-            if (token[1] != '\r' || token[2] != '\n') 
-              err = send_string(fd, UNSUP_PARAM); 
-            else{
-              // The MAIL command is valid, respond and change state
-              err = send_string(fd, OK);
-              state = TRX_SECOND_STATE;
+      case MAIL_STATE:
+        if (!strncasecmp(buffer, "MAIL FROM:", 10)) {
+          memset(reverse_path, 0, sizeof(reverse_path));
+          sscanf(buffer + 10, "%[<@:-,.A-Za-z0-9>]%*s", reverse_path);
+          if (!is_valid_path(reverse_path) && strcmp(reverse_path, "<>")) {
+            status = send_string(client_fd, RESPONSE_SYNTAX_ERROR_PARAM);
+          } else {
+            char *token = strchr(buffer, '>');
+            if (token[1] != '\r' || token[2] != '\n') {
+              status = send_string(client_fd, RESPONSE_UNSUPPORTED_PARAM);
+            } else {
+              status = send_string(client_fd, RESPONSE_OK);
+              session_state = RECIPIENT_STATE;
             } 
           }
+        } else {
+          status = validateCommandAndRespond(client_fd, buffer);
         }
-        else  // It's not a MAIL command
-          err = checkCmdAndReply(fd, buf);
- 
-        // Check if send_string succeeded
-        if (err < 0) {
-          fprintf(stderr, SEND_STRING_ERROR);
-          release(&netBuf, &userList, tempFileFD);
+
+        if (status < 0) {
+          fprintf(stderr, RESPONSE_SEND_ERROR);
+          cleanup_resources(&net_buffer, &user_list, temp_file_fd);
           return;
         }
         break;
 
-     
-      case TRX_SECOND_STATE:
-        // Expect RCPT TO: 
-        // Fall through
-      case TRX_THIRD_STATE:
-        // Expect RCPT TO: or DATA
-        if (!strncasecmp(buf, "RCPT TO:", 8)) { // It;s RCPT command
-
-          // Check if path is valid
-          char forwardPath[MAX_LINE_LENGTH];
-          memset(forwardPath, 0, sizeof(forwardPath));
-          sscanf(buf+8, "%[<@:-,.A-Za-z0-9>]%*s", forwardPath);
-          if (isValidPath(forwardPath)) {
-
-            // Check if it has parameters after forward path, i.e. not">\r\n"
-            char *token = strchr(buf, '>');
-            if (token[1] != '\r' || token[2] != '\n'){
-              err = send_string(fd, UNSUP_PARAM);
-            }
-            else { // no parameters
-
-              char *mailBox = getMailBox(forwardPath);
-              if (is_valid_user(mailBox, NULL)) {
-                // user is valid, add it into list, respond and change state
-                add_user_to_list(&userList, mailBox);
-                err = send_string(fd, OK);
-                state = TRX_THIRD_STATE;
-              }
-              else { 
-                // user is not valid
-                err = send_string(fd, MAIL_BOX_NOT_FOUND); 
+      case RECIPIENT_STATE:
+      case DATA_STATE:
+        if (!strncasecmp(buffer, "RCPT TO:", 8)) {
+          char recipient_path[MAX_BUFFER_SIZE];
+          memset(recipient_path, 0, sizeof(recipient_path));
+          sscanf(buffer + 8, "%[<@:-,.A-Za-z0-9>]%*s", recipient_path);
+          if (is_valid_path(recipient_path)) {
+            char *token = strchr(buffer, '>');
+            if (token[1] != '\r' || token[2] != '\n') {
+              status = send_string(client_fd, RESPONSE_UNSUPPORTED_PARAM);
+            } else {
+              char *mailbox = extract_mailbox(recipient_path);
+              if (is_valid_user(mailbox, NULL)) {
+                add_user_to_list(&user_list, mailbox);
+                status = send_string(client_fd, RESPONSE_OK);
+                session_state = DATA_STATE;
+              } else {
+                status = send_string(client_fd, RESPONSE_MAILBOX_NOT_FOUND);
               }
             }
+          } else {
+            status = send_string(client_fd, RESPONSE_SYNTAX_ERROR_PARAM);
           }
-          else {// it's not a valid path
-            err = send_string(fd, SYNTAX_ERROR_PARAM);
-          }
-        }
-  	else if (!strncasecmp(buf, "DATA\r\n", 6) && state == TRX_THIRD_STATE){ 
-               // It's a DATA command and We are expecting it
-               strcpy(template, "template-XXXXXX");
-               tempFileFD = mkstemp(template);
-               if (tempFileFD < 0){
-                   perror("mkstemp");
-                   send_string(fd, LOCAL_ERROR); 
-                   return;
-               }
-
-               err = send_string(fd, OK_354);
-               state = TRX_FOURTH_STATE;
-               lineEndWithCRLF = 1;
-             }
-             else { // it's not a command we expect
-               err = checkCmdAndReply(fd, buf);
-             } 
-             
-        // Check if send_string succeeded.
-        if (err < 0) {
-          fprintf(stderr, SEND_STRING_ERROR);
-          release(&netBuf, &userList, tempFileFD);
-          return;
-        }
-        break;
-
-
- 
-      case TRX_FOURTH_STATE:
-        // Expect mail data
-        err = 0;
-        // is it the end ?
-        if (lineEndWithCRLF && !strncasecmp(buf, ".\r\n", 3)) {
-          save_user_mail(template, userList);
-          destroy_user_list(userList);
-          userList = create_user_list();
-
-          // clear temp file
-          unlink(template);
-          close(tempFileFD);
-
-          state = TRX_FIRST_STATE;
-          err = send_string(fd, OK); 
-        }
-        else {
-          // remove first character if it's a '.'
-          char *whatToWrite = buf[0] == '.'? buf+1: buf;
-          if (write(tempFileFD, (void *)whatToWrite, strlen(whatToWrite)) < 0){
-            perror("write");
-            send_string(fd, LOCAL_ERROR); 
-            release(&netBuf, &userList, tempFileFD);
+        } else if (!strncasecmp(buffer, "DATA\r\n", 6) && session_state == DATA_STATE) {
+          strcpy(temp_file_template, "template-XXXXXX");
+          temp_file_fd = mkstemp(temp_file_template);
+          if (temp_file_fd < 0) {
+            perror("mkstemp");
+            send_string(client_fd, RESPONSE_LOCAL_ERROR); 
             return;
           }
-          else {
-            int len = strlen(buf);
-            lineEndWithCRLF = buf[len-2]=='\r' && buf[len-1]=='\n' ? 1 : 0;
-          }
+
+          status = send_string(client_fd, RESPONSE_START_MAIL);
+          session_state = DATA_STATE;
+          end_with_crlf = 1;
+        } else {
+          status = validateCommandAndRespond(client_fd, buffer);
         }
-       
-        // Check if send_string succeeded
-        if (err < 0) {
-          fprintf(stderr, SEND_STRING_ERROR);
-          release(&netBuf, &userList, tempFileFD);
+        
+        if (status < 0) {
+          fprintf(stderr, RESPONSE_SEND_ERROR);
+          cleanup_resources(&net_buffer, &user_list, temp_file_fd);
           return;
         }
+        break;
 
+      case DATA_STATE:
+        status = 0;
+        if (end_with_crlf && !strncasecmp(buffer, ".\r\n", 3)) {
+          save_user_mail(temp_file_template, user_list);
+          destroy_user_list(user_list);
+          user_list = create_user_list();
+          unlink(temp_file_template);
+          close(temp_file_fd);
+
+          session_state = MAIL_STATE;
+          status = send_string(client_fd, RESPONSE_OK); 
+        } else {
+          char *data_to_write = buffer[0] == '.' ? buffer + 1 : buffer;
+          if (write(temp_file_fd, data_to_write, strlen(data_to_write)) < 0) {
+            perror("write");
+            send_string(client_fd, RESPONSE_LOCAL_ERROR); 
+            cleanup_resources(&net_buffer, &user_list, temp_file_fd);
+            return;
+          } else {
+            int length = strlen(buffer);
+            end_with_crlf = buffer[length - 2] == '\r' && buffer[length - 1] == '\n' ? 1 : 0;
+          }
+        }
+        
+        if (status < 0) {
+          fprintf(stderr, RESPONSE_SEND_ERROR);
+          cleanup_resources(&net_buffer, &user_list, temp_file_fd);
+          return;
+        }
         break;
 
       default:
-        fprintf(stderr, "This is not possible\n");
-        release(&netBuf, &userList, tempFileFD);
+        fprintf(stderr, "Unexpected state\n");
+        cleanup_resources(&net_buffer, &user_list, temp_file_fd);
         return;
     }
   }
 
-  // If goes here means nb_read_line has error
-  fprintf(stderr, "Connection terminate abruptly\n");
-  release(&netBuf, &userList, tempFileFD);
+  fprintf(stderr, "Connection terminated unexpectedly\n");
+  cleanup_resources(&net_buffer, &user_list, temp_file_fd);
   return;
 }
+
